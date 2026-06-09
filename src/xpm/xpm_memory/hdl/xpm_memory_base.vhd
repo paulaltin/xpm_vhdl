@@ -292,96 +292,54 @@ begin
   clk_a <= clka;
   clk_b <= clka when CLOCKING_MODE = 0 else clkb;
 
-  gen_readfirst_a : if(WRITE_MODE_A = 1) generate
-    process (clk_a, rsta)
-    begin
-      if rsta = '1' then
-        douta_i <= (others => '0');
-      elsif rising_edge(clk_a) then
-        if ena = '1' then
-          douta_i <= ram.Get_A(addra);
-          ram.SetBE_A(addra, dina, wea);
-        end if;
+  -- Both ports share the memory below, so to reproduce block-RAM read-during-write
+  -- behaviour deterministically we evaluate BOTH ports' reads from the current
+  -- memory contents BEFORE applying EITHER write. A simultaneous same-address access
+  -- on the opposite port therefore reads the old contents (read-first) regardless of
+  -- the order in which the simulator evaluates the two clock edges, matching hardware
+  -- (which has no cross-port write-to-read forwarding path). Each port still honours
+  -- its own write mode with respect to its own write.
+  mem_proc : process (clk_a, clk_b, rsta, rstb)
+    variable rd_a : std_logic_vector(READ_DATA_WIDTH_A - 1 downto 0);
+    variable rd_b : std_logic_vector(READ_DATA_WIDTH_B - 1 downto 0);
+    variable ev_a, ev_b : boolean;
+  begin
+    ev_a := (rsta = '0') and rising_edge(clk_a) and (ena = '1');
+    ev_b := (rstb = '0') and rising_edge(clk_b) and (enb = '1');
+
+    -- Phase 1: sample both reads from the pre-write memory contents.
+    if ev_a then rd_a := ram.Get_A(addra); end if;
+    if ev_b then rd_b := ram.Get_B(addrb); end if;
+
+    -- Phase 2: apply both writes (a write with all byte-enables low is a no-op).
+    if ev_a then ram.SetBE_A(addra, dina, wea); end if;
+    if ev_b then ram.SetBE_B(addrb, dinb, web); end if;
+
+    -- Phase 3: drive each port's output register according to its write mode.
+    if rsta = '1' then
+      douta_i <= (others => '0');
+    elsif ev_a then
+      if WRITE_MODE_A = 0 then                       -- write_first: own just-written data
+        douta_i <= ram.Get_A(addra);
+      elsif WRITE_MODE_A = 1 then                    -- read_first: pre-write data
+        douta_i <= rd_a;
+      elsif wea = (wea'range => '0') then            -- no_change: update only when not writing
+        douta_i <= rd_a;
       end if;
-    end process;
-  end generate gen_readfirst_a;
-  
-  gen_writefirst_a : if(WRITE_MODE_A = 0) generate
-    process (clk_a, rsta)
-    begin
-      if rsta = '1' then
-        douta_i <= (others => '0');
-      elsif rising_edge(clk_a) then
-        if ena = '1' then
-          ram.SetBE_A(addra, dina, wea);
-          douta_i <= ram.Get_A(addra);
-        end if;
+    end if;
+
+    if rstb = '1' then
+      doutb_i <= (others => '0');
+    elsif ev_b then
+      if WRITE_MODE_B = 0 then
+        doutb_i <= ram.Get_B(addrb);
+      elsif WRITE_MODE_B = 1 then
+        doutb_i <= rd_b;
+      elsif web = (web'range => '0') then
+        doutb_i <= rd_b;
       end if;
-    end process;
-  end generate gen_writefirst_a;
-  
-  gen_nochange_a : if(WRITE_MODE_A = 2) generate
-    process (clk_a, rsta)
-    begin
-      if rsta = '1' then
-        douta_i <= (others => '0');
-      elsif rising_edge(clk_a) then
-        if ena = '1' then
-          if(wea = (wea'range=> '0')) then
-            douta_i <= ram.Get_A(addra);
-          else
-            ram.SetBE_A(addra, dina, wea);
-          end if;
-        end if;
-      end if;
-    end process;
-  end generate gen_nochange_a;
-  
-  
-  gen_readfirst_b : if(WRITE_MODE_B = 1) generate
-    process (clk_b, rstb)
-    begin
-      if rstb = '1' then
-        doutb_i <= (others => '0');
-      elsif rising_edge(clk_b) then
-        if enb = '1' then
-          doutb_i <= ram.Get_B(addrb);
-          ram.SetBE_B(addrb, dinb, web);
-        end if;
-      end if;
-    end process;
-  end generate gen_readfirst_b;
-  
-  gen_writefirst_b : if(WRITE_MODE_B = 0) generate
-    process (clk_b, rstb)
-    begin
-      if rstb = '1' then
-        doutb_i <= (others => '0');
-      elsif rising_edge(clk_b) then
-        if enb = '1' then
-          ram.SetBE_B(addrb, dinb, web);
-          doutb_i <= ram.Get_B(addrb);
-        end if;
-      end if;
-    end process;
-  end generate gen_writefirst_b;
-  
-  gen_nochange_b : if(WRITE_MODE_B = 2) generate
-    process (clk_b, rstb)
-    begin
-      if rstb = '1' then
-          doutb_i <= (others => '0');
-      elsif rising_edge(clk_b) then
-        if enb = '1' then
-          if(web = (web'range=> '0')) then
-            doutb_i <= ram.Get_B(addrb);
-          else
-            ram.SetBE_B(addrb, dinb, web);
-          end if;
-        end if;
-      end if;
-    end process;
-  end generate gen_nochange_b;
+    end if;
+  end process;
   g_latb_1: if READ_LATENCY_B < 2 generate
     output_reg_b(READ_LATENCY_B) <= doutb_i;
   end generate;
